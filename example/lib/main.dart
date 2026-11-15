@@ -134,22 +134,17 @@ class _StudioPageState extends State<StudioPage> {
   }
 
   Future<String?> _pickWav(String title) async {
-    final result = await FilePicker.platform.pickFiles(
+    final file = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: const ['wav'],
-      allowMultiple: false,
-      withData: true,
       dialogTitle: title,
     );
-    if (result == null || result.files.isEmpty) return null;
-    final file = result.files.single;
-    if (file.bytes != null) {
-      final dir = await getTemporaryDirectory();
-      final saved = File('${dir.path}/${DateTime.now().microsecondsSinceEpoch}_${file.name}');
-      await saved.writeAsBytes(file.bytes!, flush: true);
-      return saved.path;
-    }
-    return file.path;
+    if (file == null) return null;
+    final bytes = await file.readAsBytes();
+    final dir = await getTemporaryDirectory();
+    final saved = File('${dir.path}/${DateTime.now().microsecondsSinceEpoch}_${file.name}');
+    await saved.writeAsBytes(bytes, flush: true);
+    return saved.path;
   }
 
   Future<void> _pickReference() async {
@@ -175,6 +170,22 @@ class _StudioPageState extends State<StudioPage> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
     );
+  }
+
+  Future<void> _exportResult() async {
+    final path = _outputPath;
+    if (path == null) return;
+    try {
+      final bytes = await File(path).readAsBytes();
+      final saved = await FilePicker.saveFile(
+        dialogTitle: '変換した音声を書き出す',
+        fileName: 'MeanVC2_output.wav',
+        bytes: bytes,
+      );
+      if (saved != null && mounted) _showError('WAVを書き出しました');
+    } catch (e) {
+      _showError('書き出しに失敗しました: $e');
+    }
   }
 
   Future<void> _convert() async {
@@ -486,6 +497,15 @@ class _StudioPageState extends State<StudioPage> {
                   ),
                 );
               },
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: TextButton.icon(
+                onPressed: _exportResult,
+                icon: const Icon(Icons.ios_share_rounded),
+                label: const Text('WAVを書き出す'),
+              ),
             ),
           ],
         ),
