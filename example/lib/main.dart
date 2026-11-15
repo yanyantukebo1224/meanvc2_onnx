@@ -318,14 +318,14 @@ class _StudioPageState extends State<StudioPage> {
       final converted = await engine.process(chunk);
       _liveLatencyMs = watch.elapsedMicroseconds / 1000;
       if (converted.isNotEmpty) {
-        final pcm = <int>[];
+        final pcmSamples = <int>[];
         for (final sample in converted) {
           // Soft limiting prevents clipped peaks without abrupt hard clipping.
           final scaled = sample * 1.25;
           final limited = scaled / (1.0 + scaled.abs());
-          pcm.add((limited * 32767).round().clamp(-32768, 32767));
+          pcmSamples.add((limited * 32767).round().clamp(-32768, 32767));
         }
-        await pcm.FlutterPcmSound.feed(pcm.PcmArrayInt16.fromList(pcm));
+        await pcm.FlutterPcmSound.feed(pcm.PcmArrayInt16.fromList(pcmSamples));
       }
       _liveChunks++;
       if (mounted && _liveChunks % 5 == 0) {
