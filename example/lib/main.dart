@@ -84,7 +84,7 @@ class _StudioPageState extends State<StudioPage> {
 
   Future<String> get _modelDirectory async {
     final dir = await getApplicationSupportDirectory();
-    return '\${dir.path}/meanvc2_onnx';
+    return '${dir.path}/meanvc2_onnx';
   }
 
   Future<void> _prepareModels() async {
@@ -145,7 +145,7 @@ class _StudioPageState extends State<StudioPage> {
     final file = result.files.single;
     if (file.bytes != null) {
       final dir = await getTemporaryDirectory();
-      final saved = File('\${dir.path}/\${DateTime.now().microsecondsSinceEpoch}_\${file.name}');
+      final saved = File('${dir.path}/${DateTime.now().microsecondsSinceEpoch}_${file.name}');
       await saved.writeAsBytes(file.bytes!, flush: true);
       return saved.path;
     }
@@ -201,7 +201,7 @@ class _StudioPageState extends State<StudioPage> {
       if (source.isEmpty) throw const FormatException('変換する音声が空です');
       if (mounted) setState(() => _status = '声の特徴を解析しています');
       encoder = await SpeakerEncoder.load(
-        '$dir/\${MeanVc2Models.speakerFileName(_variant)}',
+        '$dir/${MeanVc2Models.speakerFileName(_variant)}',
         threads: _threads,
       );
       final embedding = await encoder.embed(reference);
@@ -229,7 +229,7 @@ class _StudioPageState extends State<StudioPage> {
         if (mounted) {
           setState(() {
             _conversionProgress = (i + 1) / chunks;
-            _status = '音声を変換しています  \${i + 1} / $chunks';
+            _status = '音声を変換しています  ${i + 1} / $chunks';
           });
         }
       }
@@ -238,7 +238,7 @@ class _StudioPageState extends State<StudioPage> {
 
       final docs = await getApplicationDocumentsDirectory();
       final outputFile = File(
-        '\${docs.path}/MeanVC2_\${DateTime.now().millisecondsSinceEpoch}.wav',
+        '${docs.path}/MeanVC2_${DateTime.now().millisecondsSinceEpoch}.wav',
       );
       await outputFile.writeAsBytes(_writeWav16k(converted), flush: true);
       await _player.setFilePath(outputFile.path);
@@ -364,7 +364,7 @@ class _StudioPageState extends State<StudioPage> {
               ),
               const SizedBox(height: 8),
               Text(
-                '\${_formatBytes(_downloadedBytes)} / \${_formatBytes(_totalBytes)}  ·  $_currentFile',
+                '${_formatBytes(_downloadedBytes)} / ${_formatBytes(_totalBytes)}  ·  $_currentFile',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 11, color: Colors.white54),
@@ -560,7 +560,7 @@ class _StudioPageState extends State<StudioPage> {
 
 String _formatBytes(int bytes) {
   if (bytes <= 0) return '0 MB';
-  return '\${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
 }
 
 Float32List _readWav16k(Uint8List bytes) {
