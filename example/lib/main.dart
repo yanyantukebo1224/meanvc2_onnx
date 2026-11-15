@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/return_code.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
 import 'package:flutter_pcm_sound_spm/flutter_pcm_sound_spm.dart' as pcm;
@@ -68,6 +69,13 @@ class _StudioPageState extends State<StudioPage> {
   Future<void> _liveQueue = Future<void>.value();
   bool _liveStarting = false;
   bool _liveActive = false;
+  static const _callAudioChannel = MethodChannel('meanvc2/call_audio');
+  bool _echoCancellation = true;
+  bool _noiseSuppression = true;
+  bool _autoGain = true;
+  bool _callInjectionEnabled = false;
+  bool _callInjectionAvailable = false;
+  String _callInjectionPermission = 'unknown';
   int _liveChunks = 0;
   double _liveLatencyMs = 0;
   String? _referencePath;
@@ -88,6 +96,7 @@ class _StudioPageState extends State<StudioPage> {
   void initState() {
     super.initState();
     _prepareModels();
+    _refreshCallAudioStatus();
   }
 
   @override
@@ -291,6 +300,47 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
+  Future<void> _refreshCallAudioStatus() async {
+    if (!Platform.isIOS) return;
+    try {
+      final status = await _callAudioChannel.invokeMapMethod<String, dynamic>('status');
+      if (!mounted || status == null) return;
+      setState(() {
+        _callInjectionAvailable = status['available'] == true;
+        _callInjectionPermission = status['permission']?.toString() ?? 'unknown';
+      });
+    } on PlatformException catch (e) {
+      if (mounted) _showError('通話連携の状態を取得できません: ${e.message}');
+    }
+  }
+
+  Future<void> _setCallInjection(bool enabled) async {
+    if (!Platform.isIOS) {
+      _showError('通話音声連携はiOSのみ対応しています');
+      return;
+    }
+    try {
+      if (enabled) {
+        final permission = await _callAudioChannel.invokeMapMethod<String, dynamic>('requestPermission');
+        if (permission?['granted'] != true) {
+          _showError('通話音声の追加が許可されていません。iOSの設定を確認してください。');
+          await _refreshCallAudioStatus();
+          return;
+        }
+      }
+      await _callAudioChannel.invokeMethod('setEnabled', {'enabled': enabled});
+      if (!mounted) return;
+      setState(() => _callInjectionEnabled = enabled);
+      await _refreshCallAudioStatus();
+      _showError(enabled
+          ? '通話への音声追加を有効にしました。対応する通話中に利用できます。'
+          : '通話への音声追加を停止しました');
+    } on PlatformException catch (e) {
+      _showError('通話連携を変更できません: ${e.message}');
+      await _refreshCallAudioStatus();
+    }
+  }
+
   Future<void> _startLive() async {
     if (_liveStarting || _liveActive || !_modelsReady || _referencePath == null) return;
     setState(() {
@@ -339,9 +389,9 @@ class _StudioPageState extends State<StudioPage> {
           encoder: AudioEncoder.pcm16bits,
           sampleRate: 16000,
           numChannels: 1,
-          echoCancel: true,
-          noiseSuppress: true,
-          autoGain: true,
+          echoCancel: _echoCancellation,
+          noiseSuppress: _noiseSuppression,
+          autoGain: _autoGain,
           streamBufferSize: 3200,
         ),
       );
@@ -506,9 +556,36 @@ class _StudioPageState extends State<StudioPage> {
                 ),
               ),
             ),
+            const SizedBox(height: 12),
+            const Divider(color: Colors.white12),
+            const Text('ノイズ・マイク制御', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: const Text('ノイズ抑制', style: TextStyle(fontSize: 12)),
+              subtitle: const Text('背景の環境音を抑える', style: TextStyle(fontSize: 10, color: Colors.white38)),
+              value: _noiseSuppression,
+              onChanged: _liveActive || _liveStarting ? null : (value) => setState(() => _noiseSuppression = value),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: const Text('エコーキャンセル', style: TextStyle(fontSize: 12)),
+              subtitle: const Text('スピーカーからの回り込みを抑える', style: TextStyle(fontSize: 10, color: Colors.white38)),
+              value: _echoCancellation,
+              onChanged: _liveActive || _liveStarting ? null : (value) => setState(() => _echoCancellation = value),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: const Text('自動ゲイン調整', style: TextStyle(fontSize: 12)),
+              subtitle: const Text('入力音量を自動調整', style: TextStyle(fontSize: 10, color: Colors.white38)),
+              value: _autoGain,
+              onChanged: _liveActive || _liveStarting ? null : (value) => setState(() => _autoGain = value),
+            ),
             const SizedBox(height: 8),
             const Text(
-              '初回出力にはモデルの先読み分として約0.3〜0.4秒かかります。イヤホン推奨。',
+              '初回出力にはモデルの先読み分として約0.3〜0.4秒かかります。イヤホン推奨。マイク処理の設定は次回の開始時から反映されます。',
               style: TextStyle(fontSize: 10, color: Colors.white38, height: 1.5),
             ),
           ],
@@ -728,6 +805,61 @@ class _StudioPageState extends State<StudioPage> {
     );
   }
 
+  Widget _callAudioCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('通話アプリ連携', '対応する通話へ変換音声を追加', Icons.call_rounded),
+            const SizedBox(height: 10),
+            const Text(
+              'iOSの通話音声追加機能を利用します。LINE・Discordなどで利用できるかは、通話中のiOS側の対応状況によります。',
+              style: TextStyle(fontSize: 11, color: Colors.white60, height: 1.5),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(
+                  _callInjectionAvailable ? Icons.check_circle_rounded : Icons.info_outline_rounded,
+                  size: 16,
+                  color: _callInjectionAvailable ? Colors.greenAccent : Colors.white54,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _callInjectionAvailable ? 'iOSが通話への音声追加を利用可能と判定' : '現在、通話への音声追加は利用可能と判定されていません',
+                    style: const TextStyle(fontSize: 11, color: Colors.white70),
+                  ),
+                ),
+                IconButton(
+                  tooltip: '状態を更新',
+                  onPressed: _refreshCallAudioStatus,
+                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                ),
+              ],
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('通話への音声追加', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+              subtitle: Text(
+                '許可状態: $_callInjectionPermission',
+                style: const TextStyle(fontSize: 10, color: Colors.white38),
+              ),
+              value: _callInjectionEnabled,
+              onChanged: (value) => _setCallInjection(value),
+            ),
+            const Text(
+              '注意: これはマイク音声を置き換える機能ではなく、変換音声を通話入力へ追加する機能です。元のマイク音声も相手に届く場合があります。利用にはiOS側の「通話にオーディオを追加」設定とアプリへの許可が必要です。',
+              style: TextStyle(fontSize: 10, color: Colors.orangeAccent, height: 1.5),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _studioCard() {
     return Card(
       child: Padding(
@@ -891,6 +1023,8 @@ class _StudioPageState extends State<StudioPage> {
             _downloadCard(),
             const SizedBox(height: 2),
             _liveCard(),
+            const SizedBox(height: 2),
+            if (Platform.isIOS) _callAudioCard(),
             const SizedBox(height: 2),
             _studioCard(),
             const SizedBox(height: 2),
