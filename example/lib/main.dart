@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_audio/return_code.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
@@ -152,10 +153,13 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
+  // Audio formats and common media containers that may contain an audio track.
   static const _audioExtensions = <String>[
-    'wav', 'wave', 'mp3', 'm4a', 'mp4', 'aac', 'flac', 'ogg', 'oga',
-    'opus', 'aiff', 'aif', 'aifc', 'caf', 'amr', 'wma', 'mka', 'mp2',
-    'mp1', 'ac3', 'eac3', 'ape', 'wv', 'tta', 'm4b', 'm4p',
+    'wav', 'wave', 'rf64', 'bw64', 'mp3', 'mp2', 'mp1',
+    'm4a', 'm4b', 'm4p', 'm4v', 'aac', 'flac', 'ogg', 'oga', 'opus', 'spx',
+    'aiff', 'aif', 'aifc', 'caf', 'au', 'snd', 'amr', 'awb', 'wma', 'asf',
+    'ac3', 'eac3', 'dts', 'ape', 'wv', 'tta', 'mka', 'mkv', 'mp4', 'mov',
+    '3gp', '3g2', 'webm', 'avi', 'mpg', 'mpeg', 'ts', 'mts', 'm2ts',
   ];
 
   Future<String?> _pickAudio(String title) async {
@@ -191,9 +195,19 @@ class _StudioPageState extends State<StudioPage> {
       throw FormatException('音声をデコードできませんでした。形式またはファイルが破損している可能性があります。 ${details ?? ''}');
     }
     try {
-      return _readWav16k(await File(outputPath).readAsBytes());
+      final decodedFile = File(outputPath);
+      if (!await decodedFile.exists()) {
+        throw const FormatException('デコード結果が作成されませんでした');
+      }
+      final decodedBytes = await decodedFile.readAsBytes();
+      if (decodedBytes.length <= 44) {
+        throw const FormatException('音声データが空か、短すぎます');
+      }
+      return _readWav16k(decodedBytes);
     } finally {
-      try { await File(outputPath).delete(); } catch (_) {}
+      try {
+        await File(outputPath).delete();
+      } catch (_) {}
     }
   }
 
@@ -480,7 +494,7 @@ class _StudioPageState extends State<StudioPage> {
     MeanVc2Stream? stream;
     try {
       final dir = await _modelDirectory;
-      final reference = _readWav16k(await File(_referencePath!).readAsBytes());
+      final reference = await _decodeAudio16k(_referencePath!);
       final source = await _decodeAudio16k(_sourcePath!);
       if (reference.length < 16000) {
         throw const FormatException('お手本音声は1秒以上のWAVを選択してください');
