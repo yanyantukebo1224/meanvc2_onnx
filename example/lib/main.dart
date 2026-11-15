@@ -16,7 +16,6 @@ import 'package:path_provider/path_provider.dart';
 
 const modelDir = String.fromEnvironment('MODEL_DIR');
 const fixtureDir = String.fromEnvironment('FIXTURE_DIR');
-const revision = String.fromEnvironment('REVISION', defaultValue: MeanVc2Models.defaultRevision);
 const variantName = String.fromEnvironment('VARIANT', defaultValue: 'int8');
 const threads = int.fromEnvironment('ORT_THREADS', defaultValue: 2);
 const autoExit = bool.fromEnvironment('AUTO_EXIT');
@@ -71,6 +70,10 @@ class _ExampleAppState extends State<ExampleApp> {
       if (dir.isEmpty) {
         dir = '${(await getApplicationSupportDirectory()).path}/meanvc2_onnx';
         await _extractBundledModels(dir, variant);
+      }
+      if (fixtureDir.isEmpty) {
+        _log('MeanVC2 int8 models are installed and ready. The example UI currently runs the offline self-check only.');
+        return;
       }
       // 1. register the reference voice (once per voice; keep the embedding)
       Float32List? spk;
