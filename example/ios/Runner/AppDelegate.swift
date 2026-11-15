@@ -1,6 +1,7 @@
 import Flutter
 import UIKit
 import AVFAudio
+import AppIntents
 #if canImport(FoundationModels)
 import FoundationModels
 #endif
@@ -154,5 +155,29 @@ private enum CallAudioIntegration {
         result(FlutterMethodNotImplemented)
       }
     }
+  }
+}
+
+
+struct OpenMeanVC2ChatIntent: AppIntent {
+  static var title: LocalizedStringResource = "Open MeanVC2 AI Voice Chat"
+  static var openAppWhenRun: Bool = true
+
+  func perform() async throws -> some IntentResult {
+    .result()
+  }
+}
+
+struct MeanVC2AppShortcuts: AppShortcutsProvider {
+  static var appShortcuts: [AppShortcut] {
+    AppShortcut(
+      intent: OpenMeanVC2ChatIntent(),
+      phrases: [
+        "Open AI voice chat in \\(.applicationName)",
+        "Start voice chat in \\(.applicationName)"
+      ],
+      shortTitle: "AI Voice Chat",
+      systemImageName: "waveform"
+    )
   }
 }
