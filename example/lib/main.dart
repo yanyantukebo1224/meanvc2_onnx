@@ -10,7 +10,6 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
 import 'package:meanvc2_onnx/meanvc2_onnx.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -42,20 +41,6 @@ class _ExampleAppState extends State<ExampleApp> {
     _run();
   }
 
-  Future<void> _extractBundledModels(String dir, ModelVariant variant) async {
-    final names = MeanVc2Models.files(variant, speaker: variant);
-    for (final name in names) {
-      final destination = File('$dir/$name');
-      if (await destination.exists()) continue;
-      final data = await rootBundle.load('assets/models/$name');
-      await destination.parent.create(recursive: true);
-      await destination.writeAsBytes(
-        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
-        flush: true,
-      );
-      _log('installed bundled model: $name');
-    }
-  }
 
   Float32List _f32(String path) {
     final b = File(path).readAsBytesSync();
@@ -69,10 +54,14 @@ class _ExampleAppState extends State<ExampleApp> {
       var dir = modelDir;
       if (dir.isEmpty) {
         dir = '${(await getApplicationSupportDirectory()).path}/meanvc2_onnx';
-        await _extractBundledModels(dir, variant);
+        await MeanVc2Models.download(
+          dir,
+          files: MeanVc2Models.files(variant, speaker: variant),
+          onFile: (file) => _log('Downloading model: $file'),
+        );
       }
       if (fixtureDir.isEmpty) {
-        _log('MeanVC2 int8 models are installed and ready. The example UI currently runs the offline self-check only.');
+        _log('MeanVC2 models are downloaded and cached on this device. The example UI currently runs the offline self-check only.');
         return;
       }
       // 1. register the reference voice (once per voice; keep the embedding)
