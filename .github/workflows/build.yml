@@ -73,6 +73,8 @@ jobs:
         with:
           channel: stable
           cache: true
+      - name: Prepare bundled ONNX models
+        run: bash tool/prepare_mobile_models.sh
       - name: Resolve example dependencies
         working-directory: example
         run: flutter pub get
