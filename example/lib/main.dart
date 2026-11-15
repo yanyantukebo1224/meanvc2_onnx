@@ -239,16 +239,55 @@ class _StudioPageState extends State<StudioPage> {
   Future<void> _exportResult() async {
     final path = _outputPath;
     if (path == null) return;
+    const formats = <String, ({String extension, String codec, String muxer, String? options})>{
+      'WAV · 無圧縮': (extension: 'wav', codec: 'pcm_s16le', muxer: 'wav', options: null),
+      'MP3 · 高互換': (extension: 'mp3', codec: 'libmp3lame', muxer: 'mp3', options: '-q:a 2'),
+      'M4A · AAC': (extension: 'm4a', codec: 'aac', muxer: 'ipod', options: '-b:a 192k'),
+      'FLAC · 可逆圧縮': (extension: 'flac', codec: 'flac', muxer: 'flac', options: null),
+      'OGG · Vorbis': (extension: 'ogg', codec: 'libvorbis', muxer: 'ogg', options: '-q:a 5'),
+      'Opus · 小容量': (extension: 'opus', codec: 'libopus', muxer: 'opus', options: '-b:a 128k'),
+    };
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('書き出し形式'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: formats.keys.map((name) => ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(name),
+            onTap: () => Navigator.of(context).pop(name),
+          )).toList(),
+        ),
+      ),
+    );
+    if (selected == null) return;
+    final format = formats[selected]!;
+    final tempPath = '${(await getTemporaryDirectory()).path}/meanvc2_export_${DateTime.now().microsecondsSinceEpoch}.${format.extension}';
     try {
-      final bytes = await File(path).readAsBytes();
+      String quote(String value) => '"${value.replaceAll('\\\\', '\\\\\\\\').replaceAll('"', '\\\\"')}"';
+      final options = format.options == null ? '' : ' ${format.options}';
+      final command = '-y -i ${quote(path)} -vn -c:a ${format.codec}$options -f ${format.muxer} ${quote(tempPath)}';
+      final session = await FFmpegKit.execute(command);
+      final returnCode = await session.getReturnCode();
+      if (!ReturnCode.isSuccess(returnCode)) {
+        final details = await session.getOutput();
+        throw FormatException('選択した形式に変換できませんでした。 ${details ?? ''}');
+      }
+      final encodedFile = File(tempPath);
+      if (!await encodedFile.exists()) throw const FormatException('書き出しファイルが作成されませんでした');
+      final bytes = await encodedFile.readAsBytes();
+      if (bytes.isEmpty) throw const FormatException('書き出し結果が空です');
       final saved = await FilePicker.saveFile(
         dialogTitle: '変換した音声を書き出す',
-        fileName: 'MeanVC2_output.wav',
+        fileName: 'MeanVC2_output.${format.extension}',
         bytes: bytes,
       );
-      if (saved != null && mounted) _showError('WAVを書き出しました');
+      if (saved != null && mounted) _showError('${format.extension.toUpperCase()}を書き出しました');
     } catch (e) {
       _showError('書き出しに失敗しました: $e');
+    } finally {
+      try { await File(tempPath).delete(); } catch (_) {}
     }
   }
 
