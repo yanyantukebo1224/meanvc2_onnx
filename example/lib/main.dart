@@ -91,6 +91,10 @@ class _StudioPageState extends State<StudioPage> {
   int _totalBytes = 0;
   double _conversionProgress = 0;
   String? _error;
+  final _chatController = TextEditingController();
+  String _chatReply = '';
+  bool _chatBusy = false;
+  bool _chatVoiceOutput = true;
 
   @override
   void initState() {
@@ -103,6 +107,7 @@ class _StudioPageState extends State<StudioPage> {
   void dispose() {
     unawaited(_disposeAudio());
     _player.dispose();
+    _chatController.dispose();
     super.dispose();
   }
 
@@ -594,6 +599,159 @@ class _StudioPageState extends State<StudioPage> {
     );
   }
 
+  Future<void> _sendChatMessage() async {
+    final prompt = _chatController.text.trim();
+    if (prompt.isEmpty || _chatBusy) return;
+    if (!Platform.isIOS) {
+      _showError('Apple Foundation ModelsチャットはiOS専用です');
+      return;
+    }
+    if (_chatVoiceOutput && _referencePath == null) {
+      _showError('音声変換にはTARGET VOICEを先に選択してください');
+      return;
+    }
+    if (_liveActive || _liveStarting || _converting) {
+      _showError('リアルタイム変換またはファイル変換を停止してから利用してください');
+      return;
+    }
+    setState(() {
+      _chatBusy = true;
+      _chatReply = '';
+    });
+    try {
+      final reply = await _callAudioChannel.invokeMethod<String>(
+        'generateChatReply',
+        {'text': prompt},
+      );
+      if (reply == null || reply.trim().isEmpty) {
+        throw const FormatException('AIから返答を取得できませんでした');
+      }
+      if (mounted) setState(() => _chatReply = reply);
+      if (_chatVoiceOutput) {
+        final speechPath = await _callAudioChannel.invokeMethod<String>(
+          'synthesizeChatReply',
+          {'text': reply},
+        );
+        if (speechPath == null) throw const FormatException('音声合成に失敗しました');
+        try {
+          final speech = await _decodeAudio16k(speechPath);
+          final dir = await _modelDirectory;
+          final reference = await _decodeAudio16k(_referencePath!);
+          final encoder = await SpeakerEncoder.load(
+            '$dir/${MeanVc2Models.speakerFileName(_variant)}',
+            threads: _threads,
+          );
+          Float32List embedding;
+          try {
+            embedding = await encoder.embed(reference);
+          } finally {
+            await encoder.close();
+          }
+          final engine = await MeanVc2Stream.load(
+            dir,
+            variant: _variant,
+            threads: _threads,
+            steps: 2,
+          );
+          try {
+            await engine.setTarget(embedding);
+            final converted = <double>[];
+            final chunks = (speech.length + kChunk - 1) ~/ kChunk;
+            for (var i = 0; i < chunks; i++) {
+              final start = i * kChunk;
+              final count = math.min(kChunk, speech.length - start);
+              final chunk = Float32List(kChunk);
+              chunk.setRange(0, count, speech, start);
+              converted.addAll(await engine.process(chunk));
+            }
+            final docs = await getApplicationDocumentsDirectory();
+            final output = File('${docs.path}/MeanVC2_AI_${DateTime.now().millisecondsSinceEpoch}.wav');
+            await output.writeAsBytes(_writeWav16k(converted), flush: true);
+            await _player.setFilePath(output.path);
+            await _player.play();
+          } finally {
+            await engine.close();
+          }
+        } finally {
+          try { await File(speechPath).delete(); } catch (_) {}
+        }
+      }
+    } on PlatformException catch (e) {
+      _showError('AIチャットを利用できません: ${e.message}');
+    } catch (e) {
+      _showError('AIチャットに失敗しました: $e');
+    } finally {
+      if (mounted) setState(() => _chatBusy = false);
+    }
+  }
+
+  Widget _chatCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('AIボイスチャット', 'Apple Foundation Models + MeanVC2', Icons.auto_awesome_rounded),
+            const SizedBox(height: 8),
+            const Text(
+              'Appleのオンデバイス言語モデルで返答を生成し、iOS音声合成の声をMeanVC2で変換して読み上げます。Siri本体の音声を直接加工する機能ではありません。',
+              style: TextStyle(fontSize: 11, color: Colors.white60, height: 1.5),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _chatController,
+              minLines: 1,
+              maxLines: 4,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _sendChatMessage(),
+              decoration: InputDecoration(
+                hintText: '話しかけたいことを入力...',
+                filled: true,
+                fillColor: const Color(0xFF0D1120),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+              ),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('変換した声で読み上げ', style: TextStyle(fontSize: 12)),
+              subtitle: const Text('TARGET VOICEを使用', style: TextStyle(fontSize: 10, color: Colors.white38)),
+              value: _chatVoiceOutput,
+              onChanged: _chatBusy ? null : (value) => setState(() => _chatVoiceOutput = value),
+            ),
+            if (_chatReply.isNotEmpty) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF24203F),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Text(_chatReply, style: const TextStyle(fontSize: 13, height: 1.5)),
+              ),
+              const SizedBox(height: 10),
+            ],
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _chatBusy ? null : _sendChatMessage,
+                icon: _chatBusy
+                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.send_rounded),
+                label: Text(_chatBusy ? 'AIが応答しています...' : 'AIに送信'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF7565ED),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _convert() async {
     if (_referencePath == null || _sourcePath == null || _converting) return;
     if (!_modelsReady) {
@@ -1025,6 +1183,8 @@ class _StudioPageState extends State<StudioPage> {
             _liveCard(),
             const SizedBox(height: 2),
             if (Platform.isIOS) _callAudioCard(),
+            const SizedBox(height: 2),
+            if (Platform.isIOS) _chatCard(),
             const SizedBox(height: 2),
             _studioCard(),
             const SizedBox(height: 2),
