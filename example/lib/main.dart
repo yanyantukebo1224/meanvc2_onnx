@@ -7,7 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
-import 'package:flutter_pcm_sound_spm/flutter_pcm_sound_spm.dart';
+import 'package:flutter_pcm_sound_spm/flutter_pcm_sound_spm.dart' as pcm;
 import 'package:meanvc2_onnx/meanvc2_onnx.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -241,12 +241,12 @@ class _StudioPageState extends State<StudioPage> {
       await engine.setTarget(embedding);
       _liveEngine = engine;
 
-      await FlutterPcmSound.setup(
+      await pcm.FlutterPcmSound.setup(
         sampleRate: 16000,
         channelCount: 1,
-        iosAudioCategory: IosAudioCategory.playAndRecord,
+        iosAudioCategory: pcm.IosAudioCategory.playAndRecord,
       );
-      await FlutterPcmSound.setFeedThreshold(3840);
+      await pcm.FlutterPcmSound.setFeedThreshold(3840);
       _liveInput = Float32List(0);
       _liveChunks = 0;
       final micStream = await _recorder.startStream(
@@ -321,10 +321,11 @@ class _StudioPageState extends State<StudioPage> {
         final pcm = <int>[];
         for (final sample in converted) {
           // Soft limiting prevents clipped peaks without abrupt hard clipping.
-          final limited = math.tanh(sample * 1.25);
+          final scaled = sample * 1.25;
+          final limited = scaled / (1.0 + scaled.abs());
           pcm.add((limited * 32767).round().clamp(-32768, 32767));
         }
-        await FlutterPcmSound.feed(PcmArrayInt16.fromList(pcm));
+        await pcm.FlutterPcmSound.feed(pcm.PcmArrayInt16.fromList(pcm));
       }
       _liveChunks++;
       if (mounted && _liveChunks % 5 == 0) {
@@ -348,7 +349,7 @@ class _StudioPageState extends State<StudioPage> {
     _liveInput = Float32List(0);
     if (wasActive) {
       try {
-        await FlutterPcmSound.release();
+        await pcm.FlutterPcmSound.release();
       } catch (_) {}
     }
     if (mounted) {
