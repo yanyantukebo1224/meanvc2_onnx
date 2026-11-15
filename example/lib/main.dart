@@ -338,7 +338,7 @@ class _StudioPageState extends State<StudioPage> {
       _liveInput = Float32List(0);
       _liveChunks = 0;
       final micStream = await _recorder.startStream(
-        const RecordConfig(
+        RecordConfig(
           encoder: AudioEncoder.pcm16bits,
           sampleRate: 16000,
           numChannels: 1,
