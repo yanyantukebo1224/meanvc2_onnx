@@ -257,6 +257,7 @@ class _StudioPageState extends State<StudioPage> {
           echoCancel: true,
           noiseSuppress: true,
           autoGain: true,
+          streamBufferSize: 3200,
         ),
       );
       _micSubscription = micStream.listen(
