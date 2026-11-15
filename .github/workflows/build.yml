@@ -1,0 +1,116 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-tests:
+    name: Dart package tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Flutter version
+        run: flutter --version
+      - name: Resolve package dependencies
+        run: flutter pub get
+      - name: Analyze package
+        run: flutter analyze
+      - name: Run package tests
+        run: flutter test
+
+  android:
+    name: Android release APK
+    runs-on: ubuntu-latest
+    needs: package-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Resolve example dependencies
+        working-directory: example
+        run: flutter pub get
+      - name: Build release APK
+        working-directory: example
+        run: flutter build apk --release
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: meanvc2-example-android-apk
+          path: example/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  ios-simulator:
+    name: iOS simulator build (unsigned)
+    runs-on: macos-latest
+    needs: package-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Resolve example dependencies
+        working-directory: example
+        run: flutter pub get
+      - name: Build iOS simulator app
+        working-directory: example
+        run: flutter build ios --release --simulator --no-codesign
+      - name: Package simulator app
+        working-directory: example
+        run: ditto -c -k --sequesterRsrc --keepParent build/ios/iphonesimulator/Runner.app meanvc2-example-ios-simulator.zip
+      - name: Upload iOS simulator app
+        uses: actions/upload-artifact@v4
+        with:
+          name: meanvc2-example-ios-simulator
+          path: example/meanvc2-example-ios-simulator.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS release app
+    runs-on: macos-latest
+    needs: package-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Resolve example dependencies
+        working-directory: example
+        run: flutter pub get
+      - name: Build macOS app
+        working-directory: example
+        run: flutter build macos --release
+      - name: Package macOS app
+        working-directory: example
+        run: ditto -c -k --sequesterRsrc --keepParent build/macos/Build/Products/Release/meanvc2_onnx_example.app meanvc2-example-macos.zip
+      - name: Upload macOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: meanvc2-example-macos
+          path: example/meanvc2-example-macos.zip
+          if-no-files-found: error
+          retention-days: 14
