@@ -1,136 +1,654 @@
-// Example and self-check for meanvc2_onnx.
-//
-// Downloads the models (or reads MODEL_DIR), registers the reference voice
-// with the speaker encoder, converts the source in 160 ms chunks and, when the
-// check fixtures are given (FIXTURE_DIR, made by tool/make_check_fixture.py),
-// compares the result with the Python ONNX Runtime output for the same noise.
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:meanvc2_onnx/meanvc2_onnx.dart';
 import 'package:path_provider/path_provider.dart';
 
-const modelDir = String.fromEnvironment('MODEL_DIR');
-const fixtureDir = String.fromEnvironment('FIXTURE_DIR');
-const variantName = String.fromEnvironment('VARIANT', defaultValue: 'int8');
-const threads = int.fromEnvironment('ORT_THREADS', defaultValue: 2);
-const autoExit = bool.fromEnvironment('AUTO_EXIT');
+const _variant = ModelVariant.int8;
+const _threads = 2;
 
-void main() => runApp(const ExampleApp());
+void main() => runApp(const MeanVcApp());
 
-class ExampleApp extends StatefulWidget {
-  const ExampleApp({super.key});
+class MeanVcApp extends StatelessWidget {
+  const MeanVcApp({super.key});
+
   @override
-  State<ExampleApp> createState() => _ExampleAppState();
+  Widget build(BuildContext context) {
+    const accent = Color(0xFF8B7CFF);
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'MeanVC2',
+      theme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: accent,
+          brightness: Brightness.dark,
+          surface: const Color(0xFF111522),
+        ),
+        scaffoldBackgroundColor: const Color(0xFF0B0E17),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xFF0B0E17),
+          surfaceTintColor: Colors.transparent,
+          centerTitle: false,
+        ),
+        cardTheme: CardThemeData(
+          color: const Color(0xFF151A29),
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        ),
+      ),
+      home: const StudioPage(),
+    );
+  }
 }
 
-class _ExampleAppState extends State<ExampleApp> {
-  final _lines = <String>[];
+class StudioPage extends StatefulWidget {
+  const StudioPage({super.key});
 
-  void _log(String s) {
-    debugPrint('[meanvc2_onnx] $s');
-    setState(() => _lines.add(s));
-  }
+  @override
+  State<StudioPage> createState() => _StudioPageState();
+}
+
+class _StudioPageState extends State<StudioPage> {
+  final _player = AudioPlayer();
+  String? _referencePath;
+  String? _sourcePath;
+  String? _outputPath;
+  String _status = 'モデルを準備しています';
+  String _currentFile = '';
+  bool _downloading = true;
+  bool _converting = false;
+  bool _modelsReady = false;
+  double _downloadProgress = 0;
+  int _downloadedBytes = 0;
+  int _totalBytes = 0;
+  double _conversionProgress = 0;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    _run();
-  }
-
-
-  Float32List _f32(String path) {
-    final b = File(path).readAsBytesSync();
-    return b.buffer.asFloat32List(b.offsetInBytes, b.lengthInBytes ~/ 4);
-  }
-
-  Future<void> _run() async {
-    final variant = ModelVariant.values.byName(variantName);
-    final report = <String, dynamic>{'platform': Platform.operatingSystem, 'variant': variantName, 'threads': threads};
-    try {
-      var dir = modelDir;
-      if (dir.isEmpty) {
-        dir = '${(await getApplicationSupportDirectory()).path}/meanvc2_onnx';
-        await MeanVc2Models.download(
-          dir,
-          files: MeanVc2Models.files(variant, speaker: variant),
-          onFile: (file) => _log('Downloading model: $file'),
-        );
-      }
-      if (fixtureDir.isEmpty) {
-        _log('MeanVC2 models are downloaded and cached on this device. The example UI currently runs the offline self-check only.');
-        return;
-      }
-      // 1. register the reference voice (once per voice; keep the embedding)
-      Float32List? spk;
-      if (fixtureDir.isNotEmpty && File('$fixtureDir/target.f32').existsSync()) {
-        final encoder = await SpeakerEncoder.load('$dir/${MeanVc2Models.speakerFileName(variant)}', threads: threads);
-        final sw = Stopwatch()..start();
-        spk = await encoder.embed(_f32('$fixtureDir/target.f32'));
-        report['speakerMs'] = sw.elapsedMilliseconds;
-        await encoder.close();
-        final ref = _f32('$fixtureDir/spk.f32');
-        report['speakerCosineVsUpstream'] = _cosine(spk, ref);
-        _log('speaker ${report['speakerMs']} ms, cosine vs upstream ${report['speakerCosineVsUpstream']}');
-        spk = ref; // the check below uses the fixture embedding so that it compares the conversion only
-      }
-      // 2. convert in 160 ms chunks
-      final vc = await MeanVc2Stream.load(dir, variant: variant, threads: threads, steps: 3);
-      await vc.setTarget(spk ?? _f32('$fixtureDir/spk.f32'));
-      final source = _f32('$fixtureDir/source.f32');
-      if (File('$fixtureDir/noise.f32').existsSync()) {
-        final noise = _f32('$fixtureDir/noise.f32');
-        var pos = 0;
-        vc.noiseFn = (n) => Float32List.fromList(Float32List.sublistView(noise, pos, pos += n * 80));
-      }
-      final out = <double>[];
-      final times = <double>[];
-      for (var i = 0; i < source.length; i += kChunk) {
-        final chunk = Float32List(kChunk)..setAll(0, Float32List.sublistView(source, i, math.min(i + kChunk, source.length)));
-        final sw = Stopwatch()..start();
-        out.addAll(await vc.process(chunk));
-        times.add(sw.elapsedMicroseconds / 1000);
-      }
-      await vc.close();
-      times.sort();
-      report['chunkMsP50'] = times[times.length ~/ 2];
-      final expected = File('$fixtureDir/expected_${variantName}_s3.f32');
-      if (expected.existsSync()) {
-        final e = _f32(expected.path);
-        double err = 0, ref = 0;
-        for (var i = 0; i < math.min(e.length, out.length); i++) {
-          err += (out[i] - e[i]) * (out[i] - e[i]);
-          ref += e[i] * e[i];
-        }
-        report['snrDbVsPython'] = 10 * math.log(ref / (err + 1e-30)) / math.ln10;
-        report['samples'] = [out.length, e.length];
-      }
-      _log(jsonEncode(report));
-    } catch (e, st) {
-      _log('error: $e\n$st');
-    }
-    debugPrint('MEANVC2_EXAMPLE ${jsonEncode(report)}');
-    if (autoExit) exit(0);
-  }
-
-  static double _cosine(Float32List a, Float32List b) {
-    double ab = 0, aa = 0, bb = 0;
-    for (var i = 0; i < a.length; i++) {
-      ab += a[i] * b[i];
-      aa += a[i] * a[i];
-      bb += b[i] * b[i];
-    }
-    return ab / math.sqrt(aa * bb);
+    _prepareModels();
   }
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        home: Scaffold(
-          appBar: AppBar(title: const Text('meanvc2_onnx')),
-          body: ListView(padding: const EdgeInsets.all(12), children: [for (final l in _lines) SelectableText(l)]),
-        ),
+  void dispose() {
+    _player.dispose();
+    super.dispose();
+  }
+
+  Future<String> get _modelDirectory async {
+    final dir = await getApplicationSupportDirectory();
+    return '\${dir.path}/meanvc2_onnx';
+  }
+
+  Future<void> _prepareModels() async {
+    setState(() {
+      _downloading = true;
+      _status = 'モデルを確認しています';
+      _error = null;
+    });
+    try {
+      final dir = await _modelDirectory;
+      await MeanVc2Models.download(
+        dir,
+        files: MeanVc2Models.files(_variant, speaker: _variant),
+        onFile: (file) {
+          if (!mounted) return;
+          setState(() {
+            _currentFile = file;
+            _status = 'ダウンロード中';
+          });
+        },
+        onProgress: (file, received, fileBytes, completed, total) {
+          if (!mounted) return;
+          setState(() {
+            _currentFile = file;
+            _downloadedBytes = completed;
+            _totalBytes = total;
+            _downloadProgress = total == 0 ? 0 : completed / total;
+          });
+        },
       );
+      if (!mounted) return;
+      setState(() {
+        _modelsReady = true;
+        _downloading = false;
+        _downloadProgress = 1;
+        _status = 'すべてのモデルが準備できました';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _downloading = false;
+        _modelsReady = false;
+        _error = e.toString();
+        _status = 'モデルの準備に失敗しました';
+      });
+    }
+  }
+
+  Future<String?> _pickWav(String title) async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['wav'],
+      allowMultiple: false,
+      withData: true,
+      dialogTitle: title,
+    );
+    if (result == null || result.files.isEmpty) return null;
+    final file = result.files.single;
+    if (file.bytes != null) {
+      final dir = await getTemporaryDirectory();
+      final saved = File('\${dir.path}/\${DateTime.now().microsecondsSinceEpoch}_\${file.name}');
+      await saved.writeAsBytes(file.bytes!, flush: true);
+      return saved.path;
+    }
+    return file.path;
+  }
+
+  Future<void> _pickReference() async {
+    try {
+      final path = await _pickWav('変換先の声（お手本）を選択');
+      if (path != null && mounted) setState(() => _referencePath = path);
+    } catch (e) {
+      _showError('音声ファイルを開けませんでした: $e');
+    }
+  }
+
+  Future<void> _pickSource() async {
+    try {
+      final path = await _pickWav('変換したい音声を選択');
+      if (path != null && mounted) setState(() => _sourcePath = path);
+    } catch (e) {
+      _showError('音声ファイルを開けませんでした: $e');
+    }
+  }
+
+  void _showError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  Future<void> _convert() async {
+    if (_referencePath == null || _sourcePath == null || _converting) return;
+    if (!_modelsReady) {
+      _showError('先にモデルのダウンロードを完了してください');
+      return;
+    }
+    setState(() {
+      _converting = true;
+      _conversionProgress = 0;
+      _error = null;
+      _status = '音声を読み込んでいます';
+    });
+    SpeakerEncoder? encoder;
+    MeanVc2Stream? stream;
+    try {
+      final dir = await _modelDirectory;
+      final reference = _readWav16k(await File(_referencePath!).readAsBytes());
+      final source = _readWav16k(await File(_sourcePath!).readAsBytes());
+      if (reference.length < 16000) {
+        throw const FormatException('お手本音声は1秒以上のWAVを選択してください');
+      }
+      if (source.isEmpty) throw const FormatException('変換する音声が空です');
+      if (mounted) setState(() => _status = '声の特徴を解析しています');
+      encoder = await SpeakerEncoder.load(
+        '$dir/\${MeanVc2Models.speakerFileName(_variant)}',
+        threads: _threads,
+      );
+      final embedding = await encoder.embed(reference);
+      await encoder.close();
+      encoder = null;
+
+      if (mounted) setState(() => _status = '変換エンジンを起動しています');
+      stream = await MeanVc2Stream.load(
+        dir,
+        variant: _variant,
+        threads: _threads,
+        steps: 3,
+      );
+      await stream.setTarget(embedding);
+
+      final converted = <double>[];
+      final chunks = (source.length + kChunk - 1) ~/ kChunk;
+      for (var i = 0; i < chunks; i++) {
+        final start = i * kChunk;
+        final end = math.min(start + kChunk, source.length);
+        final chunk = Float32List(kChunk);
+        chunk.setRange(0, end - start, source, start);
+        final output = await stream.process(chunk);
+        converted.addAll(output);
+        if (mounted) {
+          setState(() {
+            _conversionProgress = (i + 1) / chunks;
+            _status = '音声を変換しています  \${i + 1} / $chunks';
+          });
+        }
+      }
+      await stream.close();
+      stream = null;
+
+      final docs = await getApplicationDocumentsDirectory();
+      final outputFile = File(
+        '\${docs.path}/MeanVC2_\${DateTime.now().millisecondsSinceEpoch}.wav',
+      );
+      await outputFile.writeAsBytes(_writeWav16k(converted), flush: true);
+      await _player.setFilePath(outputFile.path);
+      if (!mounted) return;
+      setState(() {
+        _outputPath = outputFile.path;
+        _converting = false;
+        _conversionProgress = 1;
+        _status = '変換が完了しました';
+      });
+    } catch (e) {
+      await encoder?.close();
+      await stream?.close();
+      if (!mounted) return;
+      setState(() {
+        _converting = false;
+        _error = e.toString();
+        _status = '変換に失敗しました';
+      });
+    }
+  }
+
+  Widget _sectionTitle(String title, String subtitle, IconData icon) {
+    return Row(
+      children: [
+        Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            color: const Color(0xFF8B7CFF).withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Icon(icon, color: const Color(0xFFB8AEFF), size: 20),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 2),
+              Text(subtitle, style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.55))),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _fileTile({
+    required String title,
+    required String? path,
+    required String emptyLabel,
+    required VoidCallback onTap,
+    required IconData icon,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: const Color(0xFF0D1220),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: const Color(0xFFB8AEFF), size: 22),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: const TextStyle(fontSize: 12, color: Colors.white60)),
+                  const SizedBox(height: 4),
+                  Text(
+                    path == null ? emptyLabel : path.split(Platform.pathSeparator).last,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.add_circle_outline, color: Colors.white54),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _downloadCard() {
+    final percent = (_downloadProgress * 100).clamp(0, 100).toStringAsFixed(0);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('モデル', 'MeanVC2 int8 · オンデバイス推論', Icons.memory_rounded),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Icon(
+                  _modelsReady ? Icons.check_circle_rounded : Icons.downloading_rounded,
+                  size: 17,
+                  color: _modelsReady ? Colors.greenAccent : const Color(0xFFB8AEFF),
+                ),
+                const SizedBox(width: 8),
+                Expanded(child: Text(_status, style: const TextStyle(fontSize: 13))),
+                if (_downloading) Text('$percent%', style: const TextStyle(fontSize: 12)),
+              ],
+            ),
+            if (_downloading) ...[
+              const SizedBox(height: 10),
+              LinearProgressIndicator(
+                value: _totalBytes == 0 ? null : _downloadProgress,
+                minHeight: 7,
+                borderRadius: BorderRadius.circular(8),
+                backgroundColor: Colors.white10,
+                color: const Color(0xFF8B7CFF),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '\${_formatBytes(_downloadedBytes)} / \${_formatBytes(_totalBytes)}  ·  $_currentFile',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11, color: Colors.white54),
+              ),
+            ],
+            if (_error != null && !_converting) ...[
+              const SizedBox(height: 8),
+              Text(_error!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  onPressed: _downloading ? null : _prepareModels,
+                  icon: const Icon(Icons.refresh, size: 16),
+                  label: const Text('再試行'),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _studioCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('ボイス変換', 'お手本の声に合わせて音声を変換', Icons.graphic_eq_rounded),
+            const SizedBox(height: 18),
+            _fileTile(
+              title: 'TARGET VOICE · 変換先の声',
+              path: _referencePath,
+              emptyLabel: 'お手本のWAVを選択',
+              onTap: _pickReference,
+              icon: Icons.record_voice_over_rounded,
+            ),
+            const SizedBox(height: 10),
+            _fileTile(
+              title: 'SOURCE AUDIO · 変換元',
+              path: _sourcePath,
+              emptyLabel: '変換したいWAVを選択',
+              onTap: _pickSource,
+              icon: Icons.audio_file_rounded,
+            ),
+            const SizedBox(height: 16),
+            if (_converting) ...[
+              LinearProgressIndicator(
+                value: _conversionProgress,
+                minHeight: 6,
+                borderRadius: BorderRadius.circular(8),
+                color: const Color(0xFF8B7CFF),
+                backgroundColor: Colors.white10,
+              ),
+              const SizedBox(height: 8),
+            ],
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: (_modelsReady && !_converting && _referencePath != null && _sourcePath != null)
+                    ? _convert
+                    : null,
+                icon: _converting
+                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.auto_awesome_rounded),
+                label: Text(_converting ? '変換中...' : 'ボイス変換を開始'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF7565ED),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 15),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _resultCard() {
+    if (_outputPath == null) return const SizedBox.shrink();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('変換結果', '端末内にWAVで保存しました', Icons.check_circle_outline_rounded),
+            const SizedBox(height: 12),
+            Text(
+              _outputPath!.split(Platform.pathSeparator).last,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 13, color: Colors.white70),
+            ),
+            const SizedBox(height: 12),
+            StreamBuilder<PlayerState>(
+              stream: _player.playerStateStream,
+              builder: (context, snapshot) {
+                final playing = snapshot.data?.playing ?? false;
+                return SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () async {
+                      if (playing) {
+                        await _player.pause();
+                      } else {
+                        if (_player.processingState == ProcessingState.completed) {
+                          await _player.seek(Duration.zero);
+                        }
+                        await _player.play();
+                      }
+                    },
+                    icon: Icon(playing ? Icons.pause_rounded : Icons.play_arrow_rounded),
+                    label: Text(playing ? '一時停止' : '変換した音声を再生'),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('MeanVC2', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+            Text('ON-DEVICE VOICE CONVERSION', style: TextStyle(fontSize: 9, letterSpacing: 1.5, color: Colors.white54)),
+          ],
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'モデルを再確認',
+            onPressed: _downloading || _converting ? null : _prepareModels,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+          const SizedBox(width: 6),
+        ],
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
+          children: [
+            Container(
+              padding: const EdgeInsets.all(18),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(20),
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFF29234D), Color(0xFF171B30)],
+                ),
+              ),
+              child: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('YOUR VOICE, REIMAGINED', style: TextStyle(fontSize: 10, letterSpacing: 1.8, color: Color(0xFFC4BCFF), fontWeight: FontWeight.w700)),
+                  SizedBox(height: 8),
+                  Text('声の個性を、そのままに。', style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
+                  SizedBox(height: 5),
+                  Text('音声ファイルを選ぶだけ。変換処理はすべて端末内で実行します。', style: TextStyle(fontSize: 12, color: Colors.white70, height: 1.5)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            _downloadCard(),
+            const SizedBox(height: 2),
+            _studioCard(),
+            const SizedBox(height: 2),
+            _resultCard(),
+            const SizedBox(height: 12),
+            const Text(
+              '対応形式: WAV / PCM 16-bit または Float32 · 16 kHz mono 推奨\n'
+              'お手本音声は1秒以上の音声を使用してください。音声の利用には本人の許可を得てください。',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 10, color: Colors.white38, height: 1.6),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String _formatBytes(int bytes) {
+  if (bytes <= 0) return '0 MB';
+  return '\${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
+Float32List _readWav16k(Uint8List bytes) {
+  if (bytes.length < 44 || String.fromCharCodes(bytes.sublist(0, 4)) != 'RIFF' ||
+      String.fromCharCodes(bytes.sublist(8, 12)) != 'WAVE') {
+    throw const FormatException('WAVファイルではありません');
+  }
+  final data = ByteData.sublistView(bytes);
+  var offset = 12;
+  var format = 0;
+  var channels = 0;
+  var sampleRate = 0;
+  var bits = 0;
+  var dataOffset = -1;
+  var dataLength = 0;
+  while (offset + 8 <= bytes.length) {
+    final id = String.fromCharCodes(bytes.sublist(offset, offset + 4));
+    final size = data.getUint32(offset + 4, Endian.little);
+    final start = offset + 8;
+    if (start + size > bytes.length) throw const FormatException('WAVのチャンクが壊れています');
+    if (id == 'fmt ') {
+      format = data.getUint16(start, Endian.little);
+      channels = data.getUint16(start + 2, Endian.little);
+      sampleRate = data.getUint32(start + 4, Endian.little);
+      bits = data.getUint16(start + 14, Endian.little);
+    } else if (id == 'data') {
+      dataOffset = start;
+      dataLength = size;
+      break;
+    }
+    offset = start + size + (size.isOdd ? 1 : 0);
+  }
+  if (dataOffset < 0 || channels < 1 || channels > 2 || sampleRate <= 0 ||
+      !((format == 1 && bits == 16) || (format == 3 && bits == 32))) {
+    throw const FormatException('PCM 16-bit / Float32 の mono・stereo WAVに対応しています');
+  }
+  final bytesPerSample = bits ~/ 8;
+  final frames = dataLength ~/ (bytesPerSample * channels);
+  if (frames == 0) throw const FormatException('音声データがありません');
+  final mono = Float32List(frames);
+  for (var i = 0; i < frames; i++) {
+    var value = 0.0;
+    for (var ch = 0; ch < channels; ch++) {
+      final p = dataOffset + (i * channels + ch) * bytesPerSample;
+      value += format == 1
+          ? data.getInt16(p, Endian.little) / 32768.0
+          : data.getFloat32(p, Endian.little);
+    }
+    mono[i] = (value / channels).clamp(-1.0, 1.0);
+  }
+  if (sampleRate == 16000) return mono;
+  final outLength = (frames * 16000 / sampleRate).floor();
+  final out = Float32List(outLength);
+  for (var i = 0; i < outLength; i++) {
+    final position = i * sampleRate / 16000;
+    final left = position.floor().clamp(0, frames - 1);
+    final right = math.min(left + 1, frames - 1);
+    final fraction = position - left;
+    out[i] = mono[left] * (1 - fraction) + mono[right] * fraction;
+  }
+  return out;
+}
+
+Uint8List _writeWav16k(List<double> samples) {
+  final dataLength = samples.length * 2;
+  final out = Uint8List(44 + dataLength);
+  final data = ByteData.sublistView(out);
+  void ascii(int at, String value) {
+    for (var i = 0; i < value.length; i++) {
+      out[at + i] = value.codeUnitAt(i);
+    }
+  }
+  ascii(0, 'RIFF');
+  data.setUint32(4, 36 + dataLength, Endian.little);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  data.setUint32(16, 16, Endian.little);
+  data.setUint16(20, 1, Endian.little);
+  data.setUint16(22, 1, Endian.little);
+  data.setUint32(24, 16000, Endian.little);
+  data.setUint32(28, 32000, Endian.little);
+  data.setUint16(32, 2, Endian.little);
+  data.setUint16(34, 16, Endian.little);
+  ascii(36, 'data');
+  data.setUint32(40, dataLength, Endian.little);
+  for (var i = 0; i < samples.length; i++) {
+    final value = (samples[i].clamp(-1.0, 1.0) * 32767).round();
+    data.setInt16(44 + i * 2, value, Endian.little);
+  }
+  return out;
 }
