@@ -51,4 +51,8 @@ for name in names:
     print(f"verified {name}")
 PY
 
-echo "Bundled MeanVC2 int8 models are ready in $DEST"
+cp "$ROOT/huggingface/NOTICE" "$DEST/NOTICE.txt"
+mkdir -p "$DEST/licenses"
+cp "$ROOT"/huggingface/licenses/*.txt "$DEST/licenses/"
+
+echo "Bundled MeanVC2 int8 models and license notices are ready in $DEST"
