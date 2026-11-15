@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:ffmpeg_kit_flutter_new_audio/ffmpeg_kit.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
@@ -151,23 +152,54 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
-  Future<String?> _pickWav(String title) async {
+  static const _audioExtensions = <String>[
+    'wav', 'wave', 'mp3', 'm4a', 'mp4', 'aac', 'flac', 'ogg', 'oga',
+    'opus', 'aiff', 'aif', 'aifc', 'caf', 'amr', 'wma', 'mka', 'mp2',
+    'mp1', 'ac3', 'eac3', 'ape', 'wv', 'tta', 'm4b', 'm4p',
+  ];
+
+  Future<String?> _pickAudio(String title) async {
     final file = await FilePicker.pickFile(
       type: FileType.custom,
-      allowedExtensions: const ['wav'],
+      allowedExtensions: _audioExtensions,
       dialogTitle: title,
     );
     if (file == null) return null;
+    final extension = file.name.contains('.')
+        ? file.name.split('.').last.toLowerCase()
+        : '';
+    if (!_audioExtensions.contains(extension)) {
+      throw FormatException('未対応の音声形式です: .$extension');
+    }
     final bytes = await file.readAsBytes();
     final dir = await getTemporaryDirectory();
-    final saved = File('${dir.path}/${DateTime.now().microsecondsSinceEpoch}_${file.name}');
+    final safeName = file.name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    final saved = File('${dir.path}/${DateTime.now().microsecondsSinceEpoch}_$safeName');
     await saved.writeAsBytes(bytes, flush: true);
     return saved.path;
   }
 
+  Future<Float32List> _decodeAudio16k(String inputPath) async {
+    final dir = await getTemporaryDirectory();
+    final outputPath = '${dir.path}/meanvc2_decode_${DateTime.now().microsecondsSinceEpoch}.wav';
+    String quote(String value) => '"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"';
+    final command = '-y -i ${quote(inputPath)} -map 0:a:0 -vn -ac 1 -ar 16000 -c:a pcm_s16le -f wav ${quote(outputPath)}';
+    final session = await FFmpegKit.execute(command);
+    final returnCode = await session.getReturnCode();
+    if (!ReturnCode.isSuccess(returnCode)) {
+      final details = await session.getOutput();
+      throw FormatException('音声をデコードできませんでした。形式またはファイルが破損している可能性があります。 ${details ?? ''}');
+    }
+    try {
+      return _readWav16k(await File(outputPath).readAsBytes());
+    } finally {
+      try { await File(outputPath).delete(); } catch (_) {}
+    }
+  }
+
   Future<void> _pickReference() async {
     try {
-      final path = await _pickWav('変換先の声（お手本）を選択');
+      final path = await _pickAudio('変換先の声（お手本）を選択');
       if (path != null && mounted) setState(() => _referencePath = path);
     } catch (e) {
       _showError('音声ファイルを開けませんでした: $e');
@@ -176,7 +208,7 @@ class _StudioPageState extends State<StudioPage> {
 
   Future<void> _pickSource() async {
     try {
-      final path = await _pickWav('変換したい音声を選択');
+      final path = await _pickAudio('変換したい音声を選択');
       if (path != null && mounted) setState(() => _sourcePath = path);
     } catch (e) {
       _showError('音声ファイルを開けませんでした: $e');
@@ -218,7 +250,7 @@ class _StudioPageState extends State<StudioPage> {
         throw StateError('マイクへのアクセスが許可されていません');
       }
       final dir = await _modelDirectory;
-      final reference = _readWav16k(await File(_referencePath!).readAsBytes());
+      final reference = await _decodeAudio16k(_referencePath!);
       if (reference.length < 16000) {
         throw const FormatException('お手本音声は1秒以上のWAVを選択してください');
       }
@@ -449,7 +481,7 @@ class _StudioPageState extends State<StudioPage> {
     try {
       final dir = await _modelDirectory;
       final reference = _readWav16k(await File(_referencePath!).readAsBytes());
-      final source = _readWav16k(await File(_sourcePath!).readAsBytes());
+      final source = await _decodeAudio16k(_sourcePath!);
       if (reference.length < 16000) {
         throw const FormatException('お手本音声は1秒以上のWAVを選択してください');
       }
@@ -650,12 +682,12 @@ class _StudioPageState extends State<StudioPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _sectionTitle('ボイス変換', 'お手本の声に合わせて音声を変換', Icons.graphic_eq_rounded),
+            _sectionTitle('ボイス変換', 'MP3 / M4A / AAC / FLAC / OGG / WAV などに対応', Icons.graphic_eq_rounded),
             const SizedBox(height: 18),
             _fileTile(
               title: 'TARGET VOICE · 変換先の声',
               path: _referencePath,
-              emptyLabel: 'お手本のWAVを選択',
+              emptyLabel: 'お手本の音声ファイルを選択',
               onTap: _pickReference,
               icon: Icons.record_voice_over_rounded,
             ),
@@ -663,7 +695,7 @@ class _StudioPageState extends State<StudioPage> {
             _fileTile(
               title: 'SOURCE AUDIO · 変換元',
               path: _sourcePath,
-              emptyLabel: '変換したいWAVを選択',
+              emptyLabel: '変換したい音声ファイルを選択',
               onTap: _pickSource,
               icon: Icons.audio_file_rounded,
             ),
