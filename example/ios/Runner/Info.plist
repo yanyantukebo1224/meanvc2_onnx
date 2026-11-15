@@ -24,8 +24,6 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
-	<key>NSMicrophoneInjectionUsageDescription</key>
-	<string>MeanVC2 can add processed speech audio to supported calls when you enable the system accessibility feature.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>MeanVC2 uses the microphone to convert your voice on-device in real time.</string>
 	<key>LSRequiresIPhoneOS</key>
