@@ -5,6 +5,8 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:record/record.dart';
+import 'package:flutter_pcm_sound_spm/flutter_pcm_sound_spm.dart';
 import 'package:meanvc2_onnx/meanvc2_onnx.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -56,6 +58,15 @@ class StudioPage extends StatefulWidget {
 
 class _StudioPageState extends State<StudioPage> {
   final _player = AudioPlayer();
+  final _recorder = AudioRecorder();
+  StreamSubscription<Uint8List>? _micSubscription;
+  MeanVc2Stream? _liveEngine;
+  Float32List _liveInput = Float32List(0);
+  Future<void> _liveQueue = Future<void>.value();
+  bool _liveStarting = false;
+  bool _liveActive = false;
+  int _liveChunks = 0;
+  double _liveLatencyMs = 0;
   String? _referencePath;
   String? _sourcePath;
   String? _outputPath;
@@ -78,6 +89,8 @@ class _StudioPageState extends State<StudioPage> {
 
   @override
   void dispose() {
+    _stopLive();
+    _recorder.dispose();
     _player.dispose();
     super.dispose();
   }
@@ -186,6 +199,230 @@ class _StudioPageState extends State<StudioPage> {
     } catch (e) {
       _showError('書き出しに失敗しました: $e');
     }
+  }
+
+  Future<void> _startLive() async {
+    if (_liveStarting || _liveActive || !_modelsReady || _referencePath == null) return;
+    setState(() {
+      _liveStarting = true;
+      _status = 'リアルタイム変換を準備しています';
+      _error = null;
+    });
+    try {
+      if (!await _recorder.hasPermission()) {
+        throw StateError('マイクへのアクセスが許可されていません');
+      }
+      final dir = await _modelDirectory;
+      final reference = _readWav16k(await File(_referencePath!).readAsBytes());
+      if (reference.length < 16000) {
+        throw const FormatException('お手本音声は1秒以上のWAVを選択してください');
+      }
+      final encoder = await SpeakerEncoder.load(
+        '$dir/${MeanVc2Models.speakerFileName(_variant)}',
+        threads: _threads,
+      );
+      Float32List embedding;
+      try {
+        embedding = await encoder.embed(reference);
+      } finally {
+        await encoder.close();
+      }
+      final engine = await MeanVc2Stream.load(
+        dir,
+        variant: _variant,
+        threads: _threads,
+        steps: 2,
+      );
+      await engine.setTarget(embedding);
+      _liveEngine = engine;
+
+      await FlutterPcmSound.setup(
+        sampleRate: 16000,
+        channelCount: 1,
+        iosAudioCategory: IosAudioCategory.playAndRecord,
+      );
+      await FlutterPcmSound.setFeedThreshold(3840);
+      _liveInput = Float32List(0);
+      _liveChunks = 0;
+      final micStream = await _recorder.startStream(
+        const RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: 16000,
+          numChannels: 1,
+          echoCancel: true,
+          noiseSuppress: true,
+          autoGain: true,
+        ),
+      );
+      _micSubscription = micStream.listen(
+        _onMicrophoneData,
+        onError: (Object error) {
+          _showError('マイク入力エラー: $error');
+          _stopLive();
+        },
+        onDone: () {
+          if (_liveActive) _stopLive();
+        },
+        cancelOnError: true,
+      );
+      if (!mounted) return;
+      setState(() {
+        _liveActive = true;
+        _liveStarting = false;
+        _status = 'リアルタイム変換中';
+      });
+    } catch (e) {
+      await _stopLive();
+      if (!mounted) return;
+      setState(() {
+        _liveStarting = false;
+        _liveActive = false;
+        _error = e.toString();
+        _status = 'リアルタイム変換を開始できませんでした';
+      });
+    }
+  }
+
+  void _onMicrophoneData(Uint8List bytes) {
+    if (!_liveActive && !_liveStarting) return;
+    final evenLength = bytes.length - (bytes.length.isOdd ? 1 : 0);
+    if (evenLength <= 0) return;
+    final data = ByteData.sublistView(bytes, 0, evenLength);
+    final incoming = Float32List(evenLength ~/ 2);
+    for (var i = 0; i < incoming.length; i++) {
+      incoming[i] = data.getInt16(i * 2, Endian.little) / 32768.0;
+    }
+    final joined = Float32List(_liveInput.length + incoming.length);
+    joined.setAll(0, _liveInput);
+    joined.setAll(_liveInput.length, incoming);
+    _liveInput = joined;
+    _liveQueue = _liveQueue.then((_) => _drainLiveInput()).catchError((Object error) {
+      _showError('リアルタイム推論エラー: $error');
+      _stopLive();
+    });
+  }
+
+  Future<void> _drainLiveInput() async {
+    while (_liveInput.length >= kChunk && (_liveActive || _liveStarting)) {
+      final chunk = Float32List.fromList(_liveInput.sublist(0, kChunk));
+      _liveInput = Float32List.fromList(_liveInput.sublist(kChunk));
+      final engine = _liveEngine;
+      if (engine == null) return;
+      final watch = Stopwatch()..start();
+      final converted = await engine.process(chunk);
+      _liveLatencyMs = watch.elapsedMicroseconds / 1000;
+      if (converted.isNotEmpty) {
+        final pcm = <int>[];
+        for (final sample in converted) {
+          // Soft limiting prevents clipped peaks without abrupt hard clipping.
+          final limited = math.tanh(sample * 1.25);
+          pcm.add((limited * 32767).round().clamp(-32768, 32767));
+        }
+        await FlutterPcmSound.feed(PcmArrayInt16.fromList(pcm));
+      }
+      _liveChunks++;
+      if (mounted && _liveChunks % 5 == 0) {
+        setState(() => _status = 'リアルタイム変換中 · $_liveChunks chunks');
+      }
+    }
+  }
+
+  Future<void> _stopLive() async {
+    final wasActive = _liveActive || _liveStarting || _liveEngine != null;
+    _liveActive = false;
+    _liveStarting = false;
+    await _micSubscription?.cancel();
+    _micSubscription = null;
+    try {
+      if (await _recorder.isRecording()) await _recorder.stop();
+    } catch (_) {}
+    await _liveQueue;
+    await _liveEngine?.close();
+    _liveEngine = null;
+    _liveInput = Float32List(0);
+    if (wasActive) {
+      try {
+        await FlutterPcmSound.release();
+      } catch (_) {}
+    }
+    if (mounted) {
+      setState(() {
+        _liveActive = false;
+        _liveStarting = false;
+        _status = _modelsReady ? 'モデルの準備ができています' : _status;
+      });
+    }
+  }
+
+  Widget _liveCard() {
+    final canStart = _modelsReady && _referencePath != null && !_liveStarting && !_liveActive && !_converting;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionTitle('リアルタイム変換', 'マイク入力をその場でMeanVC2変換', Icons.mic_rounded),
+            const SizedBox(height: 12),
+            Text(
+              _referencePath == null
+                  ? '先に「TARGET VOICE」でお手本の声を選択してください。'
+                  : '変換先: ${_referencePath!.split(Platform.pathSeparator).last}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12, color: Colors.white60),
+            ),
+            const SizedBox(height: 12),
+            if (_liveActive) ...[
+              Row(
+                children: [
+                  Container(
+                    width: 9,
+                    height: 9,
+                    decoration: const BoxDecoration(color: Colors.greenAccent, shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text('LIVE', style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1.4)),
+                  const Spacer(),
+                  Text('$_liveChunks chunks', style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              LinearProgressIndicator(
+                minHeight: 4,
+                value: null,
+                borderRadius: BorderRadius.circular(8),
+                color: const Color(0xFF8B7CFF),
+                backgroundColor: Colors.white10,
+              ),
+              const SizedBox(height: 8),
+              Text('直近の推論時間: ${_liveLatencyMs.toStringAsFixed(0)} ms', style: const TextStyle(fontSize: 11, color: Colors.white54)),
+            ],
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _liveActive ? _stopLive : (canStart ? _startLive : null),
+                icon: _liveStarting
+                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    : Icon(_liveActive ? Icons.stop_rounded : Icons.mic_rounded),
+                label: Text(_liveStarting ? '準備中...' : (_liveActive ? 'リアルタイム変換を停止' : 'マイクでリアルタイム変換')),
+                style: FilledButton.styleFrom(
+                  backgroundColor: _liveActive ? const Color(0xFFB94E62) : const Color(0xFF7565ED),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              '初回出力にはモデルの先読み分として約0.3〜0.4秒かかります。イヤホン推奨。',
+              style: TextStyle(fontSize: 10, color: Colors.white38, height: 1.5),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _convert() async {
@@ -560,6 +797,8 @@ class _StudioPageState extends State<StudioPage> {
             ),
             const SizedBox(height: 14),
             _downloadCard(),
+            const SizedBox(height: 2),
+            _liveCard(),
             const SizedBox(height: 2),
             _studioCard(),
             const SizedBox(height: 2),
