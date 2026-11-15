@@ -61,8 +61,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  ios-simulator:
-    name: iOS simulator build (unsigned)
+  ios-device:
+    name: iOS device release IPA (unsigned)
     runs-on: macos-latest
     needs: package-tests
     steps:
@@ -74,17 +74,21 @@ jobs:
       - name: Resolve example dependencies
         working-directory: example
         run: flutter pub get
-      - name: Build iOS simulator app
+      - name: Build iOS device app
         working-directory: example
-        run: flutter build ios --release --simulator --no-codesign
-      - name: Package simulator app
+        run: flutter build ios --release --no-codesign
+      - name: Package unsigned device IPA
         working-directory: example
-        run: ditto -c -k --sequesterRsrc --keepParent build/ios/iphonesimulator/Runner.app meanvc2-example-ios-simulator.zip
-      - name: Upload iOS simulator app
+        shell: bash
+        run: |
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/Runner.app
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent Payload meanvc2-example-ios-unsigned.ipa
+      - name: Upload unsigned iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: meanvc2-example-ios-simulator
-          path: example/meanvc2-example-ios-simulator.zip
+          name: meanvc2-example-ios-device-unsigned-ipa
+          path: example/meanvc2-example-ios-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
 
