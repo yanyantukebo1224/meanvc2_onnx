@@ -38,30 +38,56 @@ class MeanVc2Models {
   /// each against the sha256 in the repository's `manifest.json`. Files that
   /// are already there with the right hash are kept.
   static Future<void> download(String dir, {String revision = defaultRevision, required List<String> files,
-      void Function(String file)? onFile, http.Client? client}) async {
+      void Function(String file)? onFile,
+      void Function(String file, int receivedBytes, int fileBytes, int completedBytes, int totalBytes)? onProgress,
+      http.Client? client}) async {
     final c = client ?? http.Client();
     try {
       final base = 'https://huggingface.co/$repo/resolve/$revision';
       final res = await c.get(Uri.parse('$base/manifest.json'));
       if (res.statusCode != 200) throw HttpException('manifest.json: ${res.statusCode}');
       final manifest = (jsonDecode(res.body) as Map<String, dynamic>)['files'] as Map<String, dynamic>;
+      final totalBytes = files.fold<int>(0, (sum, name) {
+        final item = manifest[name] as Map<String, dynamic>?;
+        if (item == null) throw ArgumentError('not in manifest: $name');
+        return sum + (item['bytes'] as int);
+      });
+      var completedBytes = 0;
       for (final name in files) {
         final entry = manifest[name] as Map<String, dynamic>?;
         if (entry == null) throw ArgumentError('not in manifest: $name');
         final file = File('$dir/$name');
-        if (await file.exists() && await _sha256(file) == entry['sha256']) continue;
+        final fileBytes = entry['bytes'] as int;
+        if (await file.exists() && await _sha256(file) == entry['sha256']) {
+          completedBytes += fileBytes;
+          onProgress?.call(name, fileBytes, fileBytes, completedBytes, totalBytes);
+          continue;
+        }
         onFile?.call(name);
         await file.parent.create(recursive: true);
         final part = File('${file.path}.part');
         final req = http.Request('GET', Uri.parse('$base/$name'));
         final stream = await c.send(req);
         if (stream.statusCode != 200) throw HttpException('$name: ${stream.statusCode}');
-        await stream.stream.pipe(part.openWrite());
+        var receivedBytes = 0;
+        final sink = part.openWrite();
+        try {
+          await for (final chunk in stream.stream) {
+            sink.add(chunk);
+            receivedBytes += chunk.length;
+            onProgress?.call(name, receivedBytes, fileBytes, completedBytes + receivedBytes, totalBytes);
+          }
+          await sink.flush();
+        } finally {
+          await sink.close();
+        }
         if (await _sha256(part) != entry['sha256']) {
           await part.delete();
           throw StateError('sha256 mismatch: $name');
         }
         await part.rename(file.path);
+        completedBytes += fileBytes;
+        onProgress?.call(name, fileBytes, fileBytes, completedBytes, totalBytes);
       }
     } finally {
       if (client == null) c.close();
