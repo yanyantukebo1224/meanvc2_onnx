@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -89,10 +90,14 @@ class _StudioPageState extends State<StudioPage> {
 
   @override
   void dispose() {
-    _stopLive();
-    _recorder.dispose();
+    unawaited(_disposeAudio());
     _player.dispose();
     super.dispose();
+  }
+
+  Future<void> _disposeAudio() async {
+    await _stopLive();
+    await _recorder.dispose();
   }
 
   Future<String> get _modelDirectory async {
@@ -298,7 +303,7 @@ class _StudioPageState extends State<StudioPage> {
     _liveInput = joined;
     _liveQueue = _liveQueue.then((_) => _drainLiveInput()).catchError((Object error) {
       _showError('リアルタイム推論エラー: $error');
-      _stopLive();
+      Future<void>.delayed(Duration.zero).then((_) => _stopLive());
     });
   }
 
